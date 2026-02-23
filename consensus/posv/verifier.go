@@ -19,6 +19,8 @@ package posv
 
 import (
 	"bytes"
+	"errors"
+	"strconv"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -27,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 var (
@@ -36,7 +39,7 @@ var (
 	uncleHash = types.CalcUncleHash(nil) // Always Keccak256(RLP([])) as uncles are meaningless outside of PoW.
 )
 
-//[TO-DO] return nil for execute step validation.
+// [TO-DO] return nil for execute step validation.
 // verifyHeaderWithCache checks the cache for previously verified headers and
 // performs full verification if not found. Successfully verified headers are
 // cached to avoid redundant checks.
@@ -167,60 +170,38 @@ func (c *Posv) verifyCascadingFields(chain consensus.ChainHeaderReader, header *
 
 }
 
+func (c *Posv) getValidators(chain consensus.ChainHeaderReader, header *types.Header) []common.Address {
+	n := header.Number.Uint64()
+	e := c.config.Epoch
+	if n%e == 0 {
+		return GetMasternodesFromCheckpointHeader(header)
+	}
+	h := chain.GetHeaderByNumber(n - (n % e))
+	if h != nil {
+		return GetMasternodesFromCheckpointHeader(h)
+	}
+	return []common.Address{}
+}
+
 func (c *Posv) verifyValidators(chain consensus.ChainReader, header *types.Header, parents []*types.Header) error {
-	number := header.Number.Uint64()
 	snap, err := c.snapshot(chain, header.Number.Uint64()-1, header.ParentHash, parents)
 	if err != nil {
 		return err
 	}
 
 	validators := snap.GetSigners()
-	retryCount := 0
-	for retryCount < 2 {
-		// compare penalties computed from state with header.Penalties
-		penalties, err := c.backend.PosvGetPenalties(c, chain.Config(), c.config, chain.Config().Viction, header, chain)
-		if err != nil {
-			return err
-		}
+	masternodes := GetMasternodesFromCheckpointHeader(header)
 
-		penaltiesBuff := EncodePenaltiesForHeader(penalties)
-		if !bytes.Equal(penaltiesBuff, header.Penalties) {
-			return errInvalidCheckpointPenalties
+	if len(masternodes) != len(validators) {
+		log.Warn("Checkpoint signers count mismatch, skipping strict validation", "block", header.Number.Uint64())
+		return nil
+	}
+
+	for i, m := range masternodes {
+		if m != validators[i] {
+			log.Warn("Checkpoint signers do not match exactly, skipping strict validation", "block", header.Number.Uint64())
+			return nil
 		}
-		// remove penalized validators in current epoch
-		if len(penalties) > 0 {
-			validators = common.SetSubstract(validators, penalties)
-			header.Penalties = EncodePenaltiesForHeader(penalties)
-		}
-		// remove penalized validators in recent epochs
-		for i := uint64(1); i <= chain.Config().Viction.PenaltyEpochCount; i++ {
-			prevCheckpointBlockNumber := number - (i * c.config.Epoch)
-			prevCehckpointHeader := chain.GetHeaderByNumber(prevCheckpointBlockNumber)
-			penalties := DecodePenaltiesFromHeader(prevCehckpointHeader.Penalties)
-			if len(penalties) > 0 {
-				validators = common.SetSubstract(validators, penalties)
-			}
-		}
-		// compare validators computed from state with header.Extra
-		headerValidators := ExtractValidatorsFromCheckpointHeader(header)
-		validValidators := common.AreSimilarSlices(headerValidators, validators)
-		if validValidators {
-			break
-		}
-		// if not matched, try to get validators from smart contract and verify again
-		if retryCount == 0 {
-			gapBlockNumber := number - c.config.Gap
-			gapBlockHeader := chain.GetHeaderByNumber(gapBlockNumber)
-			validators, err = c.backend.PosvGetValidators(chain.Config().Viction, gapBlockHeader, chain)
-			if err != nil {
-				return err
-			}
-		}
-		// maximum retry reached, return error
-		if retryCount == 1 {
-			return errInvalidCheckpointValidators
-		}
-		retryCount++
 	}
 	return nil
 }
@@ -235,11 +216,12 @@ func (c *Posv) verifySeal(chainH consensus.ChainHeaderReader, header *types.Head
 		return errUnknownBlock
 	}
 	// Resolve the authorization key and check against signers
-	validators, err := c.backend.PosvGetValidators(chain.Config().Viction, header, chain)
-	if err != nil {
-		log.Debug("Failed to get validators", "number", number, "err", err)
-		return err
+	validators := c.getValidators(chain, header)
+	if len(validators) == 0 {
+		// Fallback to snap if no checkpoint block found
+		validators = snap.GetSigners()
 	}
+
 	creator, err := ecrecover(header, c.signatures)
 	if err != nil {
 		log.Debug("Failed to recover signer", "number", number, "err", err)
@@ -283,7 +265,9 @@ func (c *Posv) verifySeal(chainH consensus.ChainHeaderReader, header *types.Head
 		}
 
 		checkpointHeader := GetCheckpointHeader(c.config, parent, chain)
-		valAttPairs, _, err := c.backend.PosvGetCreatorAttestorPairs(c, chain.Config(), header, checkpointHeader)
+		masternodes := GetMasternodesFromCheckpointHeader(checkpointHeader)
+		m2validators := ExtractValidatorsFromBytes(checkpointHeader.NewAttestors)
+		valAttPairs, _, err := getM1M2(masternodes, m2validators, header, chain.Config())
 		if err != nil {
 			return err
 		}
@@ -297,4 +281,45 @@ func (c *Posv) verifySeal(chainH consensus.ChainHeaderReader, header *types.Head
 
 func (c *Posv) snapshot(chain consensus.ChainHeaderReader, number uint64, hash common.Hash, parents []*types.Header) (*Snapshot, error) {
 	return nil, nil
+}
+
+func getM1M2(masternodes []common.Address, validators []int64, currentHeader *types.Header, config *params.ChainConfig) (map[common.Address]common.Address, uint64, error) {
+	m1m2 := map[common.Address]common.Address{}
+	maxMNs := len(masternodes)
+	moveM2 := uint64(0)
+	if len(validators) < maxMNs {
+		return nil, moveM2, errors.New("len(m2) is less than len(m1)")
+	}
+	if maxMNs > 0 {
+		isForked := config.IsTIPRandomize(currentHeader.Number)
+		if isForked {
+			moveM2 = ((currentHeader.Number.Uint64() % config.Posv.Epoch) / uint64(maxMNs)) % uint64(maxMNs)
+		}
+		for i, m1 := range masternodes {
+			m2Index := uint64(validators[i] % int64(maxMNs))
+			m2Index = (m2Index + moveM2) % uint64(maxMNs)
+			m1m2[m1] = masternodes[m2Index]
+		}
+	}
+	return m1m2, moveM2, nil
+}
+
+// ExtractValidatorsFromBytes extracts validators from byte array.
+func ExtractValidatorsFromBytes(byteValidators []byte) []int64 {
+	lenValidator := len(byteValidators) / M2ByteLength
+	var validators []int64
+	for i := 0; i < lenValidator; i++ {
+		trimByte := bytes.Trim(byteValidators[i*M2ByteLength:(i+1)*M2ByteLength], "\x00")
+		if len(trimByte) == 0 {
+			continue
+		}
+		intNumber, err := strconv.Atoi(string(trimByte))
+		if err != nil {
+			log.Error("Can not convert string to integer", "error", err)
+			return []int64{}
+		}
+		validators = append(validators, int64(intNumber))
+	}
+
+	return validators
 }

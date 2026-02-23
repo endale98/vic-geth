@@ -15,6 +15,13 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 )
 
+// Viction system contract addresses (protocol-level, never change)
+var (
+	TradingStateAddr                  = common.HexToAddress("0x0000000000000000000000000000000000000092")
+	TomoXLendingAddress               = common.HexToAddress("0x0000000000000000000000000000000000000093")
+	TomoXLendingFinalizedTradeAddress = common.HexToAddress("0x0000000000000000000000000000000000000094")
+)
+
 type victionProcessorState struct {
 	currentBlockNumber *big.Int
 	parrentState       *state.StateDB
@@ -52,6 +59,8 @@ func (p *StateProcessor) beforeProcess(block *types.Block, statedb *state.StateD
 }
 
 func (p *StateProcessor) afterProcess(block *types.Block, statedb *state.StateDB) error {
+	p.engine.DistributeReward(p.bc, statedb, block.Header(), block.Transactions(), block.Uncles())
+
 	if !p.config.IsAtlas(block.Number()) {
 		vrc25.UpdateFeeCapacity(statedb, p.config.Viction.VRC25Contract, p.victionState.balanceUpdated, p.victionState.totalFeeUsed)
 	}
@@ -88,18 +97,27 @@ func (p *StateProcessor) beforeApplyTransaction(block *types.Block, tx *types.Tr
 }
 
 func (p *StateProcessor) applyVictionTransaction(statedb *state.StateDB, tx *types.Transaction, header *types.Header, usedGas *uint64) (bool, *types.Receipt, uint64, error, *big.Int) {
+	if tx.To() == nil {
+		return false, nil, 0, nil, nil
+	}
+	to := *tx.To()
+
 	// 1. BlockSigner (0x89) - Validator signature transactions
-	if tx.To() != nil && *tx.To() == p.config.Viction.ValidatorBlockSignContract && p.config.IsTIPSigning(header.Number) {
+	if to == p.config.Viction.ValidatorBlockSignContract && p.config.IsTIPSigning(header.Number) {
 		return p.applySignTransaction(statedb, tx, header, usedGas)
 	}
 
-	// TODO: TomoX/TomoZ/Lending transactions intentionally skipped for now
-	// When needed, add checks for:
-	// 2. TradingStateAddr (0x92) - TomoX state synchronization
-	// 3. TomoXLendingAddress (0x93) - Lending protocol transactions
-	// 4. TomoXLendingFinalizedTradeAddress (0x94) - Lending finalization
-	// 5. TomoXContract (0x91) - Trading transactions
-	// All would call applyEmptyTransaction()
+	// 2-5. TomoX system transactions (disabled, route as empty receipts)
+	// These must still be handled during sync to avoid state divergence.
+	if p.config.IsTIPTomoX(header.Number) {
+		switch to {
+		case p.config.Viction.TomoXContract, // 0x91 - Trading
+			TradingStateAddr,                  // 0x92 - TomoX state sync
+			TomoXLendingAddress,               // 0x93 - Lending protocol
+			TomoXLendingFinalizedTradeAddress: // 0x94 - Lending finalization
+			return p.applyEmptyTransaction(statedb, tx, header, usedGas)
+		}
+	}
 
 	// Not a victionchain-specific transaction, use standard EVM
 	return false, nil, 0, nil, nil
@@ -132,6 +150,29 @@ func (p *StateProcessor) applySignTransaction(statedb *state.StateDB, tx *types.
 
 	log := &types.Log{}
 	log.Address = p.config.Viction.ValidatorBlockSignContract
+	log.BlockNumber = header.Number.Uint64()
+	statedb.AddLog(log)
+	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
+
+	return true, receipt, 0, nil, nil
+}
+
+// applyEmptyTransaction creates a receipt with 0 gas for system transactions
+// that don't require EVM execution (TomoX, Lending, etc.).
+func (p *StateProcessor) applyEmptyTransaction(statedb *state.StateDB, tx *types.Transaction, header *types.Header, usedGas *uint64) (bool, *types.Receipt, uint64, error, *big.Int) {
+	var root []byte
+	if p.config.IsByzantium(header.Number) {
+		statedb.Finalise(true)
+	} else {
+		root = statedb.IntermediateRoot(p.config.IsEIP158(header.Number)).Bytes()
+	}
+
+	receipt := types.NewReceipt(root, false, *usedGas)
+	receipt.TxHash = tx.Hash()
+	receipt.GasUsed = 0
+
+	log := &types.Log{}
+	log.Address = *tx.To()
 	log.BlockNumber = header.Number.Uint64()
 	statedb.AddLog(log)
 	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})

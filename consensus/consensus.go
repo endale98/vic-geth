@@ -93,6 +93,10 @@ type Engine interface {
 	Finalize(chain ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction,
 		uncles []*types.Header)
 
+	// DistributeReward distributes block rewards at checkpoint blocks.
+	DistributeReward(chain ChainHeaderReader, state *state.StateDB, header *types.Header,
+		txs []*types.Transaction, uncles []*types.Header)
+
 	// FinalizeAndAssemble runs any post-transaction state modifications (e.g. block
 	// rewards) and assembles the final block.
 	//

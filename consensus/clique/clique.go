@@ -558,6 +558,10 @@ func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Heade
 	header.UncleHash = types.CalcUncleHash(nil)
 }
 
+// DistributeReward implements consensus.Engine. No rewards in PoA, so this is a no-op.
+func (c *Clique) DistributeReward(chain consensus.ChainHeaderReader, state *state.StateDB, header *types.Header, txs []*types.Transaction, uncles []*types.Header) {
+}
+
 // FinalizeAndAssemble implements consensus.Engine, ensuring no uncles are set,
 // nor block rewards given, and returns the final block.
 func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {

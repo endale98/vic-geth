@@ -8,6 +8,32 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 )
 
+// Default Viction contract addresses and values
+const (
+	VictionVRC25ContractAddr      = "0x8c0faeb5C6bEd2129b8674F262Fd45c4e9468bee"
+	VictionVRC25GasPrice          = 250000000
+	VictionRandomizerContractAddr = "0x0000000000000000000000000000000000000090"
+	VictionRewardFoundationAddr   = "0x0000000000000000000000000000000000000068"
+	VictionValidatorContractAddr  = "0x0000000000000000000000000000000000000088"
+	VictionValidatorBlockSignAddr = "0x0000000000000000000000000000000000000089"
+
+	// Reward distribution percentages (must sum to 100)
+	RewardMasterPercent     = 40 // Masternode owner share
+	RewardVoterPercent      = 50 // Voter share
+	RewardFoundationPercent = 10 // Foundation share
+
+	// Block signing / merge constants
+	MergeSignRange = 15 // Block range within which signatures are merged
+)
+
+var (
+	VictionVRC25ContractAddress      = common.HexToAddress(VictionVRC25ContractAddr)
+	VictionRandomizerContractAddress = common.HexToAddress(VictionRandomizerContractAddr)
+	VictionRewardFoundationAddress   = common.HexToAddress(VictionRewardFoundationAddr)
+	VictionValidatorContractAddress  = common.HexToAddress(VictionValidatorContractAddr)
+	VictionValidatorBlockSignAddress = common.HexToAddress(VictionValidatorBlockSignAddr)
+)
+
 type VictionConfig struct {
 	AtlasVRC25MinCap *math.Decimal256 `json:"atlasVRC25MinCap,omitempty"`
 

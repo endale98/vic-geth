@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -245,9 +246,54 @@ func (c *Posv) VerifyHeader(chain consensus.ChainHeaderReader, header *types.Hea
 	return c.verifyHeaderWithCache(chain, header, nil)
 }
 
-// [TO-DO]
+func position(list []common.Address, x common.Address) int {
+	for i, item := range list {
+		if item == x {
+			return i
+		}
+	}
+	return -1
+}
+
+func Hop(length, pre, cur int) int {
+	switch {
+	case pre < cur:
+		return cur - (pre + 1)
+	case pre > cur:
+		return (length - pre) + (cur - 1)
+	default:
+		return length - 1
+	}
+}
+
 func (c *Posv) calcDifficulty(signer common.Address, parentNumber uint64, parentHash common.Hash, chain consensus.ChainHeaderReader) *big.Int {
-	return nil
+	parent := chain.GetHeader(parentHash, parentNumber)
+	if parent == nil {
+		return big.NewInt(0)
+	}
+
+	masternodes := c.getValidators(chain, parent)
+	if len(masternodes) == 0 {
+		return big.NewInt(0)
+	}
+
+	preIndex := -1
+	if parent.Number.Uint64() != 0 {
+		pre, err := ecrecover(parent, c.signatures)
+		if err == nil {
+			preIndex = position(masternodes, pre)
+		} else {
+			return big.NewInt(int64(len(masternodes) + position(masternodes, signer) - (-1)))
+		}
+	}
+
+	curIndex := position(masternodes, signer)
+
+	if preIndex == -1 || curIndex == -1 {
+		return big.NewInt(int64(len(masternodes) + curIndex - preIndex))
+	}
+
+	return big.NewInt(int64(len(masternodes) - Hop(len(masternodes), preIndex, curIndex)))
 }
 
 // [TO-DO]
@@ -269,11 +315,23 @@ func (c *Posv) Close() error {
 	return nil
 }
 
-// [TO-DO]
-// Finalize implements consensus.Engine, ensuring no uncles are set, nor block
-// rewards given, and returns the final block.
-func (c *Posv) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header) {
-	return
+// Finalize implements consensus.Engine, ensuring no uncles are set.
+func (c *Posv) Finalize(chain consensus.ChainHeaderReader, header *types.Header, statedb *state.StateDB, txs []*types.Transaction, uncles []*types.Header) {
+	// Ensure no uncles (PoSV doesn't support uncles)
+	header.UncleHash = types.CalcUncleHash(nil)
+}
+
+// DistributeReward implements consensus.Engine, distributing block rewards at reward checkpoint intervals.
+func (c *Posv) DistributeReward(chain consensus.ChainHeaderReader, statedb *state.StateDB, header *types.Header, txs []*types.Transaction, uncles []*types.Header) {
+	number := header.Number.Uint64()
+	chainConfig := chain.Config()
+	rCheckpoint := chainConfig.Posv.Epoch
+
+	if rCheckpoint > 0 && number%rCheckpoint == 0 && number > rCheckpoint {
+		if err := c.rewardForCheckpoint(chain, statedb, header); err != nil {
+			log.Error("Failed to distribute rewards", "block", number, "err", err)
+		}
+	}
 }
 
 // Author implements consensus.Engine, returning the Ethereum address recovered
@@ -308,6 +366,9 @@ func (c *Posv) CalcDifficulty(chain consensus.ChainHeaderReader, time uint64, pa
 // VerifyUncles implements consensus.Engine, always returning an error for any
 // uncles as this consensus mechanism doesn't permit uncles.
 func (c *Posv) VerifyUncles(chain consensus.ChainReader, block *types.Block) error {
+	if len(block.Uncles()) > 0 {
+		return errors.New("uncles not allowed")
+	}
 	return nil
 }
 
@@ -315,7 +376,15 @@ func (c *Posv) VerifyUncles(chain consensus.ChainReader, block *types.Block) err
 // VerifySeal implements consensus.Engine, checking whether the signature contained
 // in the header satisfies the consensus protocol requirements.
 func (c *Posv) VerifySeal(chain consensus.ChainHeaderReader, header *types.Header) error {
-	return nil
+	number := header.Number.Uint64()
+	if number == 0 {
+		return errUnknownBlock
+	}
+	snap, err := c.snapshot(chain, number-1, header.ParentHash, nil)
+	if err != nil {
+		return err
+	}
+	return c.verifySeal(chain, header, snap)
 }
 
 // encodeSigHeader encodes the header fields relevant for signing.

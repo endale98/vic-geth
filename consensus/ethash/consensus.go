@@ -576,6 +576,10 @@ func (ethash *Ethash) Finalize(chain consensus.ChainHeaderReader, header *types.
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 }
 
+// DistributeReward implements consensus.Engine. Ethash rewards are distributed in Finalize, so this is a no-op.
+func (ethash *Ethash) DistributeReward(chain consensus.ChainHeaderReader, state *state.StateDB, header *types.Header, txs []*types.Transaction, uncles []*types.Header) {
+}
+
 // FinalizeAndAssemble implements consensus.Engine, accumulating the block and
 // uncle rewards, setting the final state and assembling the block.
 func (ethash *Ethash) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
