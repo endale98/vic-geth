@@ -482,12 +482,24 @@ func (c *ChainConfig) IsMuirGlacier(num *big.Int) bool {
 // IsPetersburg returns whether num is either
 // - equal to or greater than the PetersburgBlock fork block,
 // - OR is nil, and Constantinople is active
+//
+// On Viction (Posv) networks, Petersburg is aliased to TIPTomoXCancelFeeBlock
+// to match the legacy victionchain fork activation rules.
 func (c *ChainConfig) IsPetersburg(num *big.Int) bool {
+	if c.Posv != nil {
+		return isForked(c.TIPTomoXCancelFeeBlock, num)
+	}
 	return isForked(c.PetersburgBlock, num) || c.PetersburgBlock == nil && isForked(c.ConstantinopleBlock, num)
 }
 
 // IsIstanbul returns whether num is either equal to the Istanbul fork block or greater.
+//
+// On Viction (Posv) networks, Istanbul is aliased to TIPTomoXCancelFeeBlock
+// to match the legacy victionchain fork activation rules (EIP-1884: SLOAD costs 800).
 func (c *ChainConfig) IsIstanbul(num *big.Int) bool {
+	if c.Posv != nil {
+		return isForked(c.TIPTomoXCancelFeeBlock, num)
+	}
 	return isForked(c.IstanbulBlock, num)
 }
 

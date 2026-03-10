@@ -549,7 +549,10 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return err
 	}
 	// Ensure the transaction has more gas than the basic tx fee.
-	intrGas, err := IntrinsicGas(tx.Data(), tx.To() == nil, true, pool.istanbul)
+	// On Viction (Posv) networks, EIP-2028 data gas reduction is not applied;
+	// use the same legacy 68-gas-per-non-zero-byte rate as victionchain.
+	isEIP2028 := pool.istanbul && pool.chainconfig.Posv == nil
+	intrGas, err := IntrinsicGas(tx.Data(), tx.To() == nil, true, isEIP2028)
 	if err != nil {
 		return err
 	}

@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -245,7 +246,12 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	contractCreation := msg.To() == nil
 
 	// Check clauses 4-5, subtract intrinsic gas if everything is correct
-	gas, err := IntrinsicGas(st.data, contractCreation, homestead, istanbul)
+	// On Viction (Posv) networks, EIP-2028 data gas reduction is intentionally
+	// not applied: the legacy victionchain node activated Istanbul (EIP-1884) for
+	// opcode repricing but never updated IntrinsicGas. Always charge 68 gas per
+	// non-zero data byte to stay consensus-compatible with those nodes.
+	isEIP2028 := istanbul && st.evm.ChainConfig().Posv == nil
+	gas, err := IntrinsicGas(st.data, contractCreation, homestead, isEIP2028)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +276,18 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		ret, st.gas, vmerr = st.evm.Call(sender, st.to(), st.data, st.gas, st.value)
 	}
 	st.refundGas()
-	st.state.AddBalance(st.evm.Context.Coinbase, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
+
+	feeRecipient := st.evm.Context.Coinbase
+	if st.evm.ChainConfig().Posv != nil {
+		ownerHash := st.state.GetState(st.evm.Context.Coinbase, common.Hash{})
+		owner := common.BytesToAddress(ownerHash.Bytes())
+		if owner != (common.Address{}) {
+			feeRecipient = owner
+		}
+	}
+
+	log.Info("coinbase", "address", feeRecipient.Hex(), "amount", new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
+	st.state.AddBalance(feeRecipient, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
 
 	return &ExecutionResult{
 		UsedGas:    st.gasUsed(),
