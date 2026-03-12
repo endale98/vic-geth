@@ -15,14 +15,10 @@ func GetLocDynamicArrAtElement(slotHash common.Hash, index uint64, elementSize u
 	return common.BigToHash(arrBig)
 }
 
-// GetLocMappingAtKey is used to get the location mapping at key
-func GetLocMappingAtKey(locationIdx common.Hash, key []byte) common.Hash {
-	req := append(common.LeftPadBytes(key, 32), locationIdx.Bytes()...)
-	return crypto.Keccak256Hash(req)
-}
-
-// GetOwner returns the owner of a contract (slot 0).
-// Used by the legacy TomoX order processor for relayer verification.
-func (s *StateDB) GetOwner(addr common.Address) common.Address {
-	return common.BytesToAddress(s.GetState(addr, common.Hash{}).Bytes())
+func GetLocMappingAtKey(key common.Hash, slot uint64) *big.Int {
+	slotHash := common.BigToHash(new(big.Int).SetUint64(slot))
+	retByte := crypto.Keccak256(key.Bytes(), slotHash.Bytes())
+	ret := new(big.Int)
+	ret.SetBytes(retByte)
+	return ret
 }

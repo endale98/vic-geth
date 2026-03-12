@@ -95,7 +95,7 @@ func GetAllCoinbases(statedb *state.StateDB) []common.Address {
 	slot := RelayerMappingSlot["RELAYER_COINBASES"]
 	coinbases := []common.Address{}
 	for i := uint64(0); i < relayerCount; i++ {
-		valueHash := statedb.GetState(common.HexToAddress(params.RelayerRegistrationSMC), common.BytesToHash(state.GetLocMappingAtKey(common.BigToHash(new(big.Int).SetUint64(slot)), common.BigToHash(big.NewInt(int64(i))).Bytes()).Bytes()))
+		valueHash := statedb.GetState(common.HexToAddress(params.RelayerRegistrationSMC), common.BytesToHash(state.GetLocMappingAtKey(common.BigToHash(big.NewInt(int64(i))), slot).Bytes()))
 		coinbases = append(coinbases, common.BytesToAddress(valueHash.Bytes()))
 	}
 	return coinbases

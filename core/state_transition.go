@@ -23,7 +23,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -276,18 +275,7 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 		ret, st.gas, vmerr = st.evm.Call(sender, st.to(), st.data, st.gas, st.value)
 	}
 	st.refundGas()
-
-	feeRecipient := st.evm.Context.Coinbase
-	if st.evm.ChainConfig().Posv != nil {
-		ownerHash := st.state.GetState(st.evm.Context.Coinbase, common.Hash{})
-		owner := common.BytesToAddress(ownerHash.Bytes())
-		if owner != (common.Address{}) {
-			feeRecipient = owner
-		}
-	}
-
-	log.Info("coinbase", "address", feeRecipient.Hex(), "amount", new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
-	st.state.AddBalance(feeRecipient, new(big.Int).Mul(new(big.Int).SetUint64(st.gasUsed()), st.gasPrice))
+	st.applyTransactionFee()
 
 	return &ExecutionResult{
 		UsedGas:    st.gasUsed(),

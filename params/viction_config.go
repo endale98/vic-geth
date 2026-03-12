@@ -6,6 +6,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // Legacy TomoX constants and helpers.
@@ -23,6 +24,8 @@ var (
 	RelayerCancelFee       = big.NewInt(100)   // default relayer cancel fee
 	TomoXBaseCancelFee     = big.NewInt(10000) // base cancel fee
 	RelayerRegistrationSMC = "0x0000000000000000000000000000000000000099"
+	ValidatorContract      = "0x0000000000000000000000000000000000000088"
+	ValidatorsStateSlot    = big.NewInt(1)
 )
 
 // Uint64ToHash converts a uint64 to a Hash.
@@ -298,4 +301,11 @@ func (c *VictionConfig) GetVictionBypassBalance(blockNum uint64, addr common.Add
 		}
 	}
 	return nil
+}
+
+func (c *VictionConfig) GetValidatorOwnerSlot(candidate common.Address) common.Hash {
+	// Solidity mapping lookup: keccak256(abi.encode(key, slot))
+	// key = candidate address ABI-encoded : ( 32 bytes, left-zero-padded )
+	// slot = ValidatorsStateSlot ABI-encoded : ( 32 bytes, right-justified )
+	return crypto.Keccak256Hash(candidate.Hash().Bytes(), common.BigToHash(ValidatorsStateSlot).Bytes())
 }
