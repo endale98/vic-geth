@@ -15,13 +15,16 @@ var slotTokensState = vrc25.SlotVRC25Contract["tokensState"]
 func (st *StateTransition) vrc25BuyGas() error {
 	// Default payer is the sender
 	st.payer = st.msg.From()
+	victionConfig := st.evm.ChainConfig().Viction
+	if victionConfig == nil {
+		return nil // No Viction config, proceed with standard user payment
+	}
 
 	// 1. Check if contract is sponsored (has fee capacity)
-	feeCap := vrc25.GetFeeCapacity(st.state, st.evm.ChainConfig().Viction.VRC25Contract, st.msg.To())
+	feeCap := vrc25.GetFeeCapacity(st.state, victionConfig.VRC25Contract, st.msg.To())
 	if feeCap == nil {
 		return nil // Not sponsored, proceed with standard user payment
 	}
-	victionConfig := st.evm.ChainConfig().Viction
 
 	// 2. Calculate Gas Cost with VRC25 Gas Price
 	vrc25GasFee := new(big.Int).Mul(new(big.Int).SetUint64(st.msg.Gas()), (*big.Int)(victionConfig.VRC25GasPrice))
