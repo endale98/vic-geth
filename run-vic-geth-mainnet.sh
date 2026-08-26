@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# run-vic-geth-mainnet.sh — Run vic-geth on Viction mainnet from inside the vic-geth repo.
+# run-vic-geth-mainnet.sh — Run and control a vic-geth Viction mainnet node.
 #
-# Usage:
-#   ./run-vic-geth-mainnet.sh [extra geth flags]
-#   DATADIR=/other/datadir ./run-vic-geth-mainnet.sh
+# Commands:
+#   start [geth flags]    Start detached.  Survives logout.  Logs to $LOGFILE.
+#   stop                  Graceful shutdown (SIGTERM), waits for the state flush.
+#   watch                 Follow the log.  Ctrl-C stops watching, not the node.
+#   attach                Open the geth JavaScript console over IPC.
+#   status                PID, head block, peer count.
+#   foreground [flags]    Run in this terminal (dies on logout).  For debugging.
 #
-# Defaults target the sync box: datadir /md7/main-f1, log written to $DATADIR/sync.log.
+# Environment overrides:
+#   DATADIR HTTP_PORT WS_PORT P2P_PORT GCMODE VERBOSITY LOGFILE PIDFILE
+#   GETH_BIN GO_BIN STOP_TIMEOUT
 #
-# Unlike the monorepo-root script, this one lives in the repo itself, so it works on a
-# server where only vic-geth has been cloned.
-#
-# It runs with --gcmode archive on purpose: block 8,505,900 investigation needs the state
-# trie at block 8,505,899 to still be readable after the node stops.  Default gc keeps only
+# --gcmode archive is the default on purpose: the block 8,505,900 investigation needs the
+# state trie at 8,505,899 to still be readable after the node stops.  Default gc keeps only
 # ~128 recent blocks and would discard it.
 #
 # WARNING: this writes to DATADIR.  Point it at a copy if the original must stay untouched.
@@ -28,12 +31,15 @@ P2P_PORT="${P2P_PORT:-30303}"
 GCMODE="${GCMODE:-archive}"
 VERBOSITY="${VERBOSITY:-3}"
 LOGFILE="${LOGFILE:-${DATADIR}/sync.log}"
+PIDFILE="${PIDFILE:-${DATADIR}/vic-geth.pid}"
+IPCFILE="${DATADIR}/geth.ipc"
+STOP_TIMEOUT="${STOP_TIMEOUT:-600}"
 
-# Prefer a prebuilt binary (servers), fall back to `go run` (dev machines).
-# GETH_BIN=/path/to/geth or GO_BIN=/path/to/go override the detection.
+# Prefer a prebuilt binary; `go run` only as a last resort (it runs geth as a child
+# process, which breaks signal delivery and PID tracking when detached).
 GETH_BIN="${GETH_BIN:-}"
 if [[ -z "$GETH_BIN" && -x ./build/bin/geth ]]; then
-    GETH_BIN="./build/bin/geth"
+    GETH_BIN="$(pwd)/build/bin/geth"
 fi
 GO_BIN="${GO_BIN:-go}"
 
@@ -47,51 +53,184 @@ enode://71f940f8672725d35e3f14b728dff228564e36cbe667c32a370cfe757016f2f1acb5a304
 enode://4937835b535f4f5713873841b2071b4eda7015c6c9ab328ce6c4e03e61d54a161d6a89d4e6b5087ba7229a09dc1369d8799fc63af933adc8586aa2cffd6ee15c@15.235.228.11:34343?discport=34343,\
 enode://104542739bf7ed3369d924c8350c8ab5af0666880476189d20e63c9d1258edfa84b4aa9cf2f331711fd1726d1ac2ce64b10e649b1a8b1c7ef3aa8d0c7ffe45cf@162.19.103.252:30303?discport=34343"
 
-mkdir -p "$DATADIR"
+# Populate the global ARGS array with the geth command line, plus any extra flags passed in.
+build_args() {
+    ARGS=(
+        --viction \
+        --datadir "$DATADIR" \
+        --port "$P2P_PORT" \
+        --maxpeers 50 \
+        --bootnodes "$BOOTNODES" \
+        --syncmode full \
+        --gcmode "$GCMODE" \
+        --http \
+        --http.addr 0.0.0.0 \
+        --http.port "$HTTP_PORT" \
+        --http.vhosts '*' \
+        --http.corsdomain '*' \
+        --http.api eth,net,web3,debug,txpool \
+        --ws \
+        --ws.addr 0.0.0.0 \
+        --ws.port "$WS_PORT" \
+        --ws.origins '*' \
+        --cache.noprefetch \
+        --verbosity "$VERBOSITY" \
+        "$@"
+    )
+}
 
-echo "==> Starting vic-geth on Viction mainnet"
-if [[ -n "$GETH_BIN" ]]; then
-    echo "    binary  : $GETH_BIN"
-else
-    echo "    binary  : go run ./cmd/geth (via $GO_BIN)"
-fi
-echo "    datadir : $DATADIR"
-echo "    gcmode  : $GCMODE"
-echo "    HTTP RPC: 0.0.0.0:$HTTP_PORT"
-echo "    WS RPC  : 0.0.0.0:$WS_PORT"
-echo "    P2P     : :$P2P_PORT"
-[[ -n "$LOGFILE" ]] && echo "    log     : $LOGFILE"
+die() { echo "error: $*" >&2; exit 1; }
 
-ARGS=(
-    --viction
-    --datadir "$DATADIR"
-    --port "$P2P_PORT"
-    --maxpeers 50
-    --bootnodes "$BOOTNODES"
-    --syncmode full
-    --gcmode "$GCMODE"
-    --http
-    --http.addr 0.0.0.0
-    --http.port "$HTTP_PORT"
-    --http.vhosts "*"
-    --http.corsdomain "*"
-    --http.api "eth,net,web3,debug,txpool"
-    --ws
-    --ws.addr 0.0.0.0
-    --ws.port "$WS_PORT"
-    --ws.origins "*"
-    --cache.noprefetch
-    --verbosity "$VERBOSITY"
-    "$@"
-)
+# Echo the running node's PID, or nothing.  The pidfile is authoritative when it points at a
+# live process using this datadir; otherwise fall back to a scan, which also recovers the PID
+# after a crash or a start from another shell.  Matching on DATADIR keeps other geth nodes on
+# the same host out of scope.
+node_pid() {
+    local pid=""
+    if [[ -f "$PIDFILE" ]]; then
+        pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null &&
+           ps -o args= -p "$pid" 2>/dev/null | grep -qF -- "$DATADIR"; then
+            echo "$pid"
+            return
+        fi
+    fi
+    pgrep -f -- "geth.*--datadir $DATADIR( |$)" 2>/dev/null | head -1 || true
+}
 
-if [[ -n "$GETH_BIN" ]]; then
-    CMD=("$GETH_BIN" "${ARGS[@]}")
-else
-    CMD=("$GO_BIN" run ./cmd/geth "${ARGS[@]}")
-fi
+require_binary() {
+    [[ -n "$GETH_BIN" ]] || die "no geth binary found. Run 'make geth' first, or set GETH_BIN=/path/to/geth"
+    [[ -x "$GETH_BIN" ]] || die "GETH_BIN is not executable: $GETH_BIN"
+}
 
-if [[ -n "$LOGFILE" ]]; then
-    exec "${CMD[@]}" 2>&1 | tee -a "$LOGFILE"
-fi
-exec "${CMD[@]}"
+# vic-geth stores its data in <datadir>/vic-geth (from clientIdentifier), not <datadir>/geth.
+# Pointing at a datadir written by another client silently starts a fresh sync from genesis,
+# so say so loudly rather than discovering it hours later.
+check_instance_dir() {
+    local mine="$DATADIR/vic-geth/chaindata"
+    [[ -d "$mine" ]] && return 0
+    local other
+    for other in "$DATADIR"/*/chaindata; do
+        [[ -d "$other" ]] || continue
+        echo "WARNING: $mine does not exist, but $other does." >&2
+        echo "         vic-geth will start a NEW sync from genesis." >&2
+        echo "         To reuse it:  ln -s $(basename "$(dirname "$other")") $DATADIR/vic-geth" >&2
+        return 0
+    done
+    return 0
+}
+
+cmd_start() {
+    require_binary
+    local running
+    running="$(node_pid)"
+    [[ -z "$running" ]] || die "already running (pid $running). Use 'stop' first, or 'watch' to follow it."
+
+    mkdir -p "$DATADIR"
+    check_instance_dir
+
+    build_args "$@"
+
+    # nohup makes the node ignore SIGHUP, so it outlives the login session.
+    nohup "$GETH_BIN" "${ARGS[@]}" >>"$LOGFILE" 2>&1 </dev/null &
+    local pid=$!
+    sleep 1
+
+    kill -0 "$pid" 2>/dev/null || die "node exited immediately. Check $LOGFILE"
+    echo "$pid" > "$PIDFILE"
+
+    echo "==> vic-geth started"
+    echo "    pid     : $pid"
+    echo "    datadir : $DATADIR"
+    echo "    gcmode  : $GCMODE"
+    echo "    log     : $LOGFILE"
+    echo "    watch   : $0 watch"
+    echo "    stop    : $0 stop"
+}
+
+cmd_stop() {
+    local pid
+    pid="$(node_pid)"
+    if [[ -z "$pid" ]]; then
+        echo "not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+
+    # SIGTERM, not SIGINT: a process started in the background by a non-interactive shell
+    # inherits SIGINT ignored, so 'stop' would hang forever waiting on a signal the node
+    # never receives.  geth's handler treats both identically (cmd/utils/cmd.go:75).
+    echo "==> stopping pid $pid (SIGTERM), waiting up to ${STOP_TIMEOUT}s for the state flush"
+    kill -TERM "$pid"
+
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if (( waited >= STOP_TIMEOUT )); then
+            echo "still running after ${STOP_TIMEOUT}s. Do NOT kill -9: that skips the state" >&2
+            echo "flush and loses the archive state. Watch $LOGFILE and wait." >&2
+            return 1
+        fi
+        sleep 2
+        waited=$((waited + 2))
+        (( waited % 20 == 0 )) && echo "    ... ${waited}s"
+    done
+
+    rm -f "$PIDFILE"
+    echo "==> stopped cleanly"
+}
+
+cmd_watch() {
+    [[ -f "$LOGFILE" ]] || die "no log at $LOGFILE"
+    echo "==> following $LOGFILE (Ctrl-C stops watching, the node keeps running)"
+    tail -f "$LOGFILE"
+}
+
+cmd_attach() {
+    require_binary
+    [[ -S "$IPCFILE" ]] || die "no IPC socket at $IPCFILE — is the node running?"
+    exec "$GETH_BIN" attach "$IPCFILE"
+}
+
+cmd_status() {
+    local pid
+    pid="$(node_pid)"
+    if [[ -z "$pid" ]]; then
+        echo "vic-geth: not running"
+        return 1
+    fi
+    echo "vic-geth: running (pid $pid)"
+    echo "  datadir: $DATADIR"
+    echo "  log    : $LOGFILE"
+    if [[ -n "$GETH_BIN" && -S "$IPCFILE" ]]; then
+        "$GETH_BIN" attach --exec \
+            'console.log("  head   : " + eth.blockNumber + "\n  peers  : " + net.peerCount + "\n  syncing: " + JSON.stringify(eth.syncing))' \
+            "$IPCFILE" 2>/dev/null || echo "  (IPC query failed — node may still be starting)"
+    fi
+}
+
+cmd_foreground() {
+    require_binary
+    mkdir -p "$DATADIR"
+    check_instance_dir
+    build_args "$@"
+    exec "$GETH_BIN" "${ARGS[@]}"
+}
+
+usage() {
+    sed -n '/^# Commands:/,/^# WARNING/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+command="${1:-}"
+[[ $# -gt 0 ]] && shift
+case "$command" in
+    start)      cmd_start "$@" ;;
+    stop)       cmd_stop ;;
+    watch|logs) cmd_watch ;;
+    attach)     cmd_attach ;;
+    status)     cmd_status ;;
+    foreground) cmd_foreground "$@" ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
